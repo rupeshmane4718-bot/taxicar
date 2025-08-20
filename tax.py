@@ -1,67 +1,101 @@
 import streamlit as st
 import firebase_admin
 from firebase_admin import credentials, firestore
-from datetime import date
+import datetime, os
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
 from reportlab.lib import colors
 
-# 🔹 Firebase Setup
-cred = credentials.Certificate("serviceAccountKey.json")
-firebase_admin.initialize_app(cred)
+# ----------------- Firebase Init -----------------
+if not firebase_admin._apps:  # ✅ Prevent duplicate initialization
+    cred = credentials.Certificate("serviceAccountKey.json")  # <-- replace with your key
+    firebase_admin.initialize_app(cred)
+
 db = firestore.client()
 
-st.title("🎓 Student Attendance System")
+# ----------------- Streamlit UI -----------------
+st.set_page_config(page_title="Student Attendance System", layout="wide")
+st.title("🎓 Student Attendance Tracker")
 
-# Input student Pass ID
-pass_id = st.text_input("Enter Pass ID")
+menu = st.sidebar.radio("📌 Menu", ["Add Student", "Mark Attendance", "Generate Report"])
 
-if st.button("Mark Attendance"):
-    today = str(date.today())
+# ----------------- Add Student -----------------
+if menu == "Add Student":
+    st.subheader("➕ Register New Student")
 
-    # Check if student exists
-    students_ref = db.collection("students").where("pass_id", "==", pass_id).get()
-    if students_ref:
-        student = students_ref[0].to_dict()
-        name = student["name"]
+    with st.form("student_form"):
+        student_id = st.text_input("Student ID")
+        name = st.text_input("Full Name")
+        course = st.text_input("Course/Department")
+        submit = st.form_submit_button("Add Student")
 
+        if submit:
+            if student_id and name:
+                db.collection("students").document(student_id).set({
+                    "name": name,
+                    "course": course,
+                })
+                st.success(f"✅ Student {name} ({student_id}) added successfully!")
+            else:
+                st.error("⚠️ Please fill all required fields.")
+
+# ----------------- Mark Attendance -----------------
+elif menu == "Mark Attendance":
+    st.subheader("📝 Mark Attendance")
+
+    students = db.collection("students").stream()
+    for student in students:
+        data = student.to_dict()
+        sid = student.id
+        status = st.radio(
+            f"{sid} - {data['name']} ({data.get('course','')})",
+            ["Present", "Absent"],
+            key=f"att_{sid}_{datetime.date.today()}"
+        )
         # Save attendance
-        db.collection("attendance").document(today).set({
-            pass_id: {"name": name, "status": "Present"}
-        }, merge=True)
+        db.collection("attendance").document(f"{sid}_{datetime.date.today()}").set({
+            "student_id": sid,
+            "name": data['name'],
+            "course": data.get('course', ''),
+            "date": str(datetime.date.today()),
+            "status": status
+        })
 
-        st.success(f"✅ Attendance marked for {name}")
-    else:
-        st.error("❌ Student not found!")
+# ----------------- Generate Report -----------------
+elif menu == "Generate Report":
+    st.subheader("📄 Generate Attendance Report (PDF)")
 
-# 🔹 Generate Attendance PDF
-if st.button("Generate PDF Report"):
-    today = str(date.today())
-    attendance_doc = db.collection("attendance").document(today).get()
+    date = st.date_input("Select Date", datetime.date.today())
+    generate = st.button("Generate Report")
 
-    if attendance_doc.exists:
-        attendance_data = attendance_doc.to_dict()
+    if generate:
+        records = db.collection("attendance").where("date", "==", str(date)).stream()
+        data = [["Student ID", "Name", "Course", "Date", "Status"]]
 
-        # Prepare PDF
-        pdf_file = f"attendance_{today}.pdf"
-        doc = SimpleDocTemplate(pdf_file, pagesize=letter)
-        data = [["Pass ID", "Name", "Status"]]
+        for rec in records:
+            r = rec.to_dict()
+            data.append([r['student_id'], r['name'], r['course'], r['date'], r['status']])
 
-        for pid, details in attendance_data.items():
-            data.append([pid, details["name"], details["status"]])
+        if len(data) == 1:
+            st.warning("⚠️ No records found for this date.")
+        else:
+            # Generate PDF
+            filename = f"Attendance_{date}.pdf"
+            doc = SimpleDocTemplate(filename, pagesize=letter)
+            table = Table(data)
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), colors.grey),
+                ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+                ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+                ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                ('BOTTOMPADDING', (0,0), (-1,0), 12),
+                ('BACKGROUND', (0,1), (-1,-1), colors.beige),
+                ('GRID', (0,0), (-1,-1), 1, colors.black),
+            ]))
+            doc.build([table])
 
-        table = Table(data)
-        table.setStyle(TableStyle([
-            ("BACKGROUND", (0,0), (-1,0), colors.grey),
-            ("TEXTCOLOR", (0,0), (-1,0), colors.whitesmoke),
-            ("ALIGN", (0,0), (-1,-1), "CENTER"),
-            ("GRID", (0,0), (-1,-1), 1, colors.black)
-        ]))
+            st.success(f"✅ Report generated: {filename}")
+            with open(filename, "rb") as file:
+                st.download_button("⬇️ Download PDF", file, file_name=filename)
 
-        doc.build([table])
-        st.success(f"📄 PDF Generated: {pdf_file}")
-        with open(pdf_file, "rb") as f:
-            st.download_button("⬇ Download Report", f, file_name=pdf_file, mime="application/pdf")
-    else:
-        st.warning("⚠ No attendance found for today!")
-
+            os.remove(filename)  # cleanup temp file
