@@ -1,120 +1,109 @@
 import streamlit as st
 import firebase_admin
 from firebase_admin import credentials, firestore
+from datetime import date
+import qrcode
+from PIL import Image
+from qreader import QReader
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
 from reportlab.lib import colors
-import datetime, os, qrcode
-from pyzbar.pyzbar import decode
-from PIL import Image
+import os
 
-# ----------------- Firebase Init -----------------
+# ---------------- Firebase Init ----------------
 if not firebase_admin._apps:
-    cred = credentials.Certificate("serviceAccountKey.json")
+    cred = credentials.Certificate("serviceAccountKey.json")  # put your Firebase service key
     firebase_admin.initialize_app(cred)
 
 db = firestore.client()
 
-st.title("🎓 Student Attendance via QR Pass")
+st.title("🎓 Student Attendance System with QR")
 
-menu = st.sidebar.radio("Menu", ["Generate Pass", "Upload QR for Attendance", "Attendance Report"])
-
-# ----------------- Generate Pass -----------------
-if menu == "Generate Pass":
-    st.subheader("🎟 Generate Student Pass")
-
-    sid = st.text_input("Student ID")
+# ---------------- Register Student & Generate Pass ----------------
+with st.expander("➕ Register Student & Generate Pass"):
     name = st.text_input("Student Name")
-    course = st.text_input("Course")
+    pass_id = st.text_input("Assign Pass ID")
 
     if st.button("Generate Pass"):
-        if sid and name:
-            # Save student
-            db.collection("students").document(sid).set({
+        if name and pass_id:
+            # Save student in Firestore
+            db.collection("students").document(pass_id).set({
                 "name": name,
-                "course": course
+                "pass_id": pass_id
             })
 
-            # Create QR
-            qr = qrcode.make(sid)
-            qr.save(f"{sid}.png")
+            # Generate QR Code
+            qr = qrcode.make(pass_id)
+            qr_file = f"{pass_id}_qr.png"
+            qr.save(qr_file)
 
-            # Generate PDF pass
-            filename = f"Pass_{sid}.pdf"
-            doc = SimpleDocTemplate(filename, pagesize=letter)
-            table_data = [["Student Pass"], [f"ID: {sid}"], [f"Name: {name}"], [f"Course: {course}"]]
-            table = Table(table_data, colWidths=[400])
-            table.setStyle(TableStyle([
-                ("BACKGROUND", (0,0), (-1,0), colors.grey),
-                ("TEXTCOLOR", (0,0), (-1,0), colors.whitesmoke),
-                ("ALIGN", (0,0), (-1,-1), "CENTER"),
-                ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-                ("FONTSIZE", (0,0), (-1,-1), 14),
-                ("BOX", (0,0), (-1,-1), 1, colors.black),
-                ("GRID", (0,0), (-1,-1), 0.5, colors.black),
-            ]))
-            doc.build([table])
+            st.image(qr_file, caption=f"QR Code for {name}")
+            with open(qr_file, "rb") as f:
+                st.download_button("⬇ Download Pass (QR)", f, file_name=qr_file)
 
-            st.success("✅ Pass generated successfully")
-            with open(filename, "rb") as file:
-                st.download_button("⬇️ Download Pass PDF", file, file_name=filename)
-
-            os.remove(filename)
         else:
-            st.error("⚠️ Fill all fields")
+            st.error("Please enter name and pass ID!")
 
-# ----------------- Upload QR for Attendance -----------------
-elif menu == "Upload QR for Attendance":
-    st.subheader("📸 Upload QR Code to Mark Attendance")
-    qr_file = st.file_uploader("Upload Student QR", type=["png", "jpg", "jpeg"])
+# ---------------- Attendance Marking ----------------
+with st.expander("📝 Mark Attendance via QR"):
+    uploaded_file = st.file_uploader("Upload QR Image", type=["png", "jpg", "jpeg"])
+    if uploaded_file:
+        img = Image.open(uploaded_file)
+        st.image(img, caption="Uploaded QR")
 
-    if qr_file:
-        img = Image.open(qr_file)
-        decoded = decode(img)
+        qreader = QReader()
+        decoded = qreader.detect_and_decode(img)
+
         if decoded:
-            sid = decoded[0].data.decode("utf-8")
-            student = db.collection("students").document(sid).get()
-            if student.exists:
-                data = student.to_dict()
-                db.collection("attendance").document(f"{sid}_{datetime.date.today()}").set({
-                    "student_id": sid,
-                    "name": data["name"],
-                    "course": data["course"],
-                    "date": str(datetime.date.today()),
-                    "status": "Present"
-                })
-                st.success(f"✅ Attendance marked for {data['name']} ({sid})")
+            pass_id = decoded[0]
+            st.success(f"✅ QR Code Detected: {pass_id}")
+
+            today = str(date.today())
+            student_ref = db.collection("students").document(pass_id).get()
+
+            if student_ref.exists:
+                student = student_ref.to_dict()
+                name = student["name"]
+
+                # Save attendance
+                db.collection("attendance").document(today).set({
+                    pass_id: {"name": name, "status": "Present"}
+                }, merge=True)
+
+                st.success(f"Attendance marked for {name}")
             else:
-                st.error("❌ Student not found in database")
+                st.error("❌ Student not found in database!")
         else:
-            st.error("⚠️ Could not read QR code")
+            st.error("⚠ Could not read QR code")
 
-# ----------------- Attendance Report -----------------
-elif menu == "Attendance Report":
-    st.subheader("📄 Generate Attendance Report")
-    date = st.date_input("Select Date", datetime.date.today())
-    if st.button("Generate Report"):
-        records = db.collection("attendance").where("date", "==", str(date)).stream()
-        data = [["Student ID", "Name", "Course", "Date", "Status"]]
-        for rec in records:
-            r = rec.to_dict()
-            data.append([r["student_id"], r["name"], r["course"], r["date"], r["status"]])
+# ---------------- Generate PDF Report ----------------
+if st.button("📄 Generate Attendance Report"):
+    today = str(date.today())
+    attendance_doc = db.collection("attendance").document(today).get()
 
-        if len(data) > 1:
-            filename = f"Attendance_{date}.pdf"
-            doc = SimpleDocTemplate(filename, pagesize=letter)
-            table = Table(data)
-            table.setStyle(TableStyle([
-                ("BACKGROUND", (0,0), (-1,0), colors.grey),
-                ("TEXTCOLOR", (0,0), (-1,0), colors.whitesmoke),
-                ("ALIGN", (0,0), (-1,-1), "CENTER"),
-                ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-                ("GRID", (0,0), (-1,-1), 1, colors.black),
-            ]))
-            doc.build([table])
-            st.success(f"✅ Report generated: {filename}")
-            with open(filename, "rb") as file:
-                st.download_button("⬇️ Download PDF", file, file_name=filename)
-            os.remove(filename)
-        else:
-            st.warning("⚠️ No attendance records for this date")
+    if attendance_doc.exists:
+        attendance_data = attendance_doc.to_dict()
+
+        pdf_file = f"attendance_{today}.pdf"
+        doc = SimpleDocTemplate(pdf_file, pagesize=letter)
+        data = [["Pass ID", "Name", "Status"]]
+
+        for pid, details in attendance_data.items():
+            data.append([pid, details["name"], details["status"]])
+
+        table = Table(data)
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.grey),
+            ("TEXTCOLOR", (0,0), (-1,0), colors.whitesmoke),
+            ("ALIGN", (0,0), (-1,-1), "CENTER"),
+            ("GRID", (0,0), (-1,-1), 1, colors.black)
+        ]))
+
+        doc.build([table])
+
+        st.success(f"📄 PDF Generated for {today}")
+        with open(pdf_file, "rb") as f:
+            st.download_button("⬇ Download Report", f, file_name=pdf_file, mime="application/pdf")
+    else:
+        st.warning("⚠ No attendance found for today!")
+
