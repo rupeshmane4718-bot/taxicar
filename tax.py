@@ -2,88 +2,47 @@ import streamlit as st
 import firebase_admin
 from firebase_admin import credentials, firestore
 from datetime import date
-import qrcode
-from PIL import Image
-from qreader import QReader
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
 from reportlab.lib import colors
-import os
 
-# ---------------- Firebase Init ----------------
-if not firebase_admin._apps:
-    cred = credentials.Certificate("serviceAccountKey.json")  # put your Firebase service key
-    firebase_admin.initialize_app(cred)
-
+# 🔹 Firebase Setup
+cred = credentials.Certificate("serviceAccountKey.json")
+firebase_admin.initialize_app(cred)
 db = firestore.client()
 
-st.title("🎓 Student Attendance System with QR")
+st.title("🎓 Student Attendance System")
 
-# ---------------- Register Student & Generate Pass ----------------
-with st.expander("➕ Register Student & Generate Pass"):
-    name = st.text_input("Student Name")
-    pass_id = st.text_input("Assign Pass ID")
+# Input student Pass ID
+pass_id = st.text_input("Enter Pass ID")
 
-    if st.button("Generate Pass"):
-        if name and pass_id:
-            # Save student in Firestore
-            db.collection("students").document(pass_id).set({
-                "name": name,
-                "pass_id": pass_id
-            })
+if st.button("Mark Attendance"):
+    today = str(date.today())
 
-            # Generate QR Code
-            qr = qrcode.make(pass_id)
-            qr_file = f"{pass_id}_qr.png"
-            qr.save(qr_file)
+    # Check if student exists
+    students_ref = db.collection("students").where("pass_id", "==", pass_id).get()
+    if students_ref:
+        student = students_ref[0].to_dict()
+        name = student["name"]
 
-            st.image(qr_file, caption=f"QR Code for {name}")
-            with open(qr_file, "rb") as f:
-                st.download_button("⬇ Download Pass (QR)", f, file_name=qr_file)
+        # Save attendance
+        db.collection("attendance").document(today).set({
+            pass_id: {"name": name, "status": "Present"}
+        }, merge=True)
 
-        else:
-            st.error("Please enter name and pass ID!")
+        st.success(f"✅ Attendance marked for {name}")
+    else:
+        st.error("❌ Student not found!")
 
-# ---------------- Attendance Marking ----------------
-with st.expander("📝 Mark Attendance via QR"):
-    uploaded_file = st.file_uploader("Upload QR Image", type=["png", "jpg", "jpeg"])
-    if uploaded_file:
-        img = Image.open(uploaded_file)
-        st.image(img, caption="Uploaded QR")
-
-        qreader = QReader()
-        decoded = qreader.detect_and_decode(img)
-
-        if decoded:
-            pass_id = decoded[0]
-            st.success(f"✅ QR Code Detected: {pass_id}")
-
-            today = str(date.today())
-            student_ref = db.collection("students").document(pass_id).get()
-
-            if student_ref.exists:
-                student = student_ref.to_dict()
-                name = student["name"]
-
-                # Save attendance
-                db.collection("attendance").document(today).set({
-                    pass_id: {"name": name, "status": "Present"}
-                }, merge=True)
-
-                st.success(f"Attendance marked for {name}")
-            else:
-                st.error("❌ Student not found in database!")
-        else:
-            st.error("⚠ Could not read QR code")
-
-# ---------------- Generate PDF Report ----------------
-if st.button("📄 Generate Attendance Report"):
+# 🔹 Generate Attendance PDF
+if st.button("Generate PDF Report"):
     today = str(date.today())
     attendance_doc = db.collection("attendance").document(today).get()
 
     if attendance_doc.exists:
         attendance_data = attendance_doc.to_dict()
 
+        # Prepare PDF
         pdf_file = f"attendance_{today}.pdf"
         doc = SimpleDocTemplate(pdf_file, pagesize=letter)
         data = [["Pass ID", "Name", "Status"]]
@@ -100,8 +59,7 @@ if st.button("📄 Generate Attendance Report"):
         ]))
 
         doc.build([table])
-
-        st.success(f"📄 PDF Generated for {today}")
+        st.success(f"📄 PDF Generated: {pdf_file}")
         with open(pdf_file, "rb") as f:
             st.download_button("⬇ Download Report", f, file_name=pdf_file, mime="application/pdf")
     else:
