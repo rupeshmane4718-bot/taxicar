@@ -1,0 +1,7 @@
+streamlit
+firebase-admin
+reportlab
+qrcode[pil]
+pillow
+numpy
+qreader
